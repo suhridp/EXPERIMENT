@@ -24,7 +24,11 @@ jobs:
         pip install requests beautifulsoup4 pdfplumber
 
     - name: Run JRF Agent
+      env:
+        EMAIL: ${{ secrets.EMAIL }}
+        PASSWORD: ${{ secrets.PASSWORD }}
       run: python jrf_agent.py
+
     
     - name: Commit updated hash database
       run: |
