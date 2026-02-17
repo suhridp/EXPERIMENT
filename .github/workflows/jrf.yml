@@ -25,3 +25,12 @@ jobs:
 
     - name: Run JRF Agent
       run: python jrf_agent.py
+    
+    - name: Commit updated hash database
+      run: |
+        git config --global user.name "github-actions"
+        git config --global user.email "actions@github.com"
+        git add pdf_hashes.txt || echo "No hash file"
+        git commit -m "Update PDF hash database" || echo "No changes"
+        git push
+
