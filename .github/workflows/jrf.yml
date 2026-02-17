@@ -27,7 +27,7 @@ jobs:
       env:
         EMAIL: ${{ secrets.EMAIL }}
         PASSWORD: ${{ secrets.PASSWORD }}
-      run: python jrf_agent.py
+      run: python jrf_Alert.py
 
     
     - name: Commit updated hash database
