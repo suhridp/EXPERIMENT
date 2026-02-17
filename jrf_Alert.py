@@ -1,35 +1,46 @@
 import requests
 from bs4 import BeautifulSoup
 import pdfplumber
-import smtplib
 import hashlib
 import os
 import logging
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 # -------------------------
 # CONFIG
 # -------------------------
-URLS = {
-    "IIT Madras": "https://icandsr.iitm.ac.in/recruitment/",
-    "IISC":"https://iisc.ac.in/careers/contractual-positions/",
-    "IITG":"https://www.iitg.ac.in/iitg_reqr?ct=RzNJNURKa005enFYa3RJWWtvM2cvQT09"
-    "IITB":"https://ep.iitb.ac.in/jobsearch#",
-    "IITK":"https://www.iitk.ac.in/dord/scientific-and-research-staff",
-    "IITD":"https://ird.iitd.ac.in/current-openings"
-    }
 
-KEYWORDS = ["JRF", "Junior Research Fellow"]
+IIT_ROOTS = {
+    "IIT Bombay": [
+        "https://www.iitb.ac.in/en/careers",
+        "https://rnd.iitb.ac.in/jobs"
+    ],
+    "IIT Delhi": [
+        "https://ird.iitd.ac.in/current-openings",
+        "https://home.iitd.ac.in/jobs-iitd/index.php"
+    ],
+    "IIT Madras": [
+        "https://icandsr.iitm.ac.in/recruitment/"
+    ],
+    "IIT Kanpur": [
+        "https://www.iitk.ac.in/new/recruitment"
+    ],
+    "IIT Kharagpur": [
+        "https://erp.iitkgp.ac.in/SricWeb/temporaryJobs.htm"
+    ],
+    "IIT Roorkee": [
+        "https://iitr.ac.in/Careers/index.html"
+    ],
+}
 
-EMAIL = "your_email@gmail.com"
-PASSWORD = "your_app_password"
+KEYWORDS = ["JRF", "Junior Research Fellow", "Project Associate"]
 
-DOWNLOAD_FOLDER = "pdfs"
-SEEN_FILE = "seen.txt"
+MAX_DEPTH = 2
+HASH_DB = "pdf_hashes.txt"
+DOWNLOAD_DIR = "pdfs"
 
-# -------------------------
-# LOGGING
-# -------------------------
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 logging.basicConfig(
     filename="jrf_agent.log",
     level=logging.INFO,
@@ -37,92 +48,118 @@ logging.basicConfig(
 )
 
 # -------------------------
-# SETUP
+# HASH STORAGE
 # -------------------------
-os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-def load_seen():
-    if not os.path.exists(SEEN_FILE):
+def load_hashes():
+    if not os.path.exists(HASH_DB):
         return set()
-    with open(SEEN_FILE, "r") as f:
+    with open(HASH_DB, "r") as f:
         return set(f.read().splitlines())
 
-def save_seen(hash_value):
-    with open(SEEN_FILE, "a") as f:
-        f.write(hash_value + "\n")
+def save_hash(h):
+    with open(HASH_DB, "a") as f:
+        f.write(h + "\n")
+
+def hash_content(content):
+    return hashlib.sha256(content).hexdigest()
 
 # -------------------------
-# EMAIL
+# PDF TEXT EXTRACTION
 # -------------------------
-def send_email(subject, body):
-    try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL, PASSWORD)
-        message = f"Subject: {subject}\n\n{body}"
-        server.sendmail(EMAIL, EMAIL, message)
-        server.quit()
-        logging.info("Email sent successfully.")
-    except Exception as e:
-        logging.error(f"Email error: {e}")
 
-# -------------------------
-# PDF EXTRACT
-# -------------------------
-def extract_pdf_text(file_path):
+def extract_text(file_path):
     text = ""
     try:
         with pdfplumber.open(file_path) as pdf:
             for page in pdf.pages:
                 text += page.extract_text() or ""
     except Exception as e:
-        logging.error(f"PDF extraction error: {e}")
+        logging.warning(f"PDF read error: {e}")
     return text
 
 # -------------------------
-# MAIN
+# CONTROLLED CRAWLER
 # -------------------------
-def check_sites():
-    seen = load_seen()
 
-    for name, url in URLS.items():
-        try:
-            response = requests.get(url, timeout=15)
-            soup = BeautifulSoup(response.text, "html.parser")
+def crawl_page(base_url, current_url, depth, visited, seen_hashes):
 
-            for link in soup.find_all("a", href=True):
-                href = link["href"]
+    if depth > MAX_DEPTH:
+        return
 
-                if ".pdf" in href.lower():
-                    pdf_url = urljoin(url, href)
-                    pdf_hash = hashlib.md5(pdf_url.encode()).hexdigest()
+    if current_url in visited:
+        return
 
-                    if pdf_hash in seen:
-                        continue
+    visited.add(current_url)
 
-                    logging.info(f"New PDF found: {pdf_url}")
+    try:
+        response = requests.get(current_url, timeout=15)
+        soup = BeautifulSoup(response.text, "html.parser")
+    except Exception as e:
+        logging.warning(f"Page fetch error: {current_url} | {e}")
+        return
 
-                    pdf_response = requests.get(pdf_url, timeout=15)
-                    file_path = os.path.join(DOWNLOAD_FOLDER, pdf_hash + ".pdf")
+    for link in soup.find_all("a", href=True):
 
-                    with open(file_path, "wb") as f:
-                        f.write(pdf_response.content)
+        full_url = urljoin(current_url, link["href"])
+        parsed_base = urlparse(base_url).netloc
+        parsed_link = urlparse(full_url).netloc
 
-                    text = extract_pdf_text(file_path)
+        # Stay within same domain
+        if parsed_base not in parsed_link:
+            continue
 
-                    for keyword in KEYWORDS:
-                        if keyword.lower() in text.lower():
-                            subject = f"JRF PDF Found at {name}"
-                            body = f"Keyword '{keyword}' found\n\nLink: {pdf_url}"
-                            send_email(subject, body)
-                            break
+        # PDF detection
+        if full_url.lower().endswith(".pdf"):
+            process_pdf(full_url, seen_hashes)
 
-                    save_seen(pdf_hash)
+        # Follow relevant pages only
+        elif any(keyword in full_url.lower() for keyword in
+                 ["recruit", "career", "project", "sponsored", "temporary"]):
 
-        except Exception as e:
-            logging.error(f"Error checking {name}: {e}")
+            crawl_page(base_url, full_url, depth + 1, visited, seen_hashes)
+
+# -------------------------
+# PDF PROCESSOR
+# -------------------------
+
+def process_pdf(pdf_url, seen_hashes):
+
+    try:
+        pdf_response = requests.get(pdf_url, timeout=15)
+        content_hash = hash_content(pdf_response.content)
+
+        if content_hash in seen_hashes:
+            return
+
+        file_path = os.path.join(DOWNLOAD_DIR, content_hash + ".pdf")
+        with open(file_path, "wb") as f:
+            f.write(pdf_response.content)
+
+        text = extract_text(file_path)
+
+        if any(k.lower() in text.lower() for k in KEYWORDS):
+            logging.info(f"NEW_JRF_FOUND: {pdf_url}")
+            print(f"NEW JRF FOUND: {pdf_url}")
+
+        save_hash(content_hash)
+
+    except Exception as e:
+        logging.warning(f"PDF processing error: {pdf_url} | {e}")
+
+# -------------------------
+# MAIN RUN
+# -------------------------
 
 if __name__ == "__main__":
-    logging.info("Starting JRF Agent run...")
-    check_sites()
-    logging.info("Run completed.")
+
+    logging.info("Starting Hybrid IIT Scan")
+
+    seen_hashes = load_hashes()
+
+    for institute, roots in IIT_ROOTS.items():
+        logging.info(f"Scanning {institute}")
+        for root in roots:
+            crawl_page(root, root, 0, set(), seen_hashes)
+
+    logging.info("Scan Completed")
